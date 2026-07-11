@@ -1,5 +1,6 @@
 import express, { NextFunction, Request, Response } from 'express';
-import { config, isWechatPayConfigured } from './config';
+import { timingSafeEqual } from 'crypto';
+import { assertServiceConfig, config, isWechatPayConfigured } from './config';
 import type {
   CheckWechatInvoiceSubMerchantStatusInput,
   ConfigureWechatInvoiceDevelopmentConfigInput,
@@ -35,10 +36,23 @@ app.use(
 
 function requireServiceKey(req: Request, res: Response, next: NextFunction): void {
   if (!config.apiKey) {
+    if (process.env.NODE_ENV === 'production') {
+      res.status(503).json({
+        success: false,
+        error: {
+          code: 'PAYMENT_SERVICE_MISCONFIGURED',
+          message: 'Payment service authentication is not configured.',
+        },
+      });
+      return;
+    }
     next();
     return;
   }
-  if (req.header('x-payment-service-key') !== config.apiKey) {
+  const providedKey = req.header('x-payment-service-key') || '';
+  const expected = Buffer.from(config.apiKey);
+  const provided = Buffer.from(providedKey);
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
     res.status(401).json({ success: false, error: { code: 'PAYMENT_SERVICE_UNAUTHORIZED', message: 'Unauthorized.' } });
     return;
   }
@@ -218,9 +232,15 @@ app.post('/v1/wechat/notify', requireServiceKey, async (req: Request, res: Respo
 });
 
 if (require.main === module) {
-  app.listen(config.port, config.host, () => {
-    console.info(`wechat-pay service listening on ${config.host}:${config.port}`);
-  });
+  try {
+    assertServiceConfig();
+    app.listen(config.port, config.host, () => {
+      console.info(`wechat-pay service listening on ${config.host}:${config.port}`);
+    });
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
 }
 
 export default app;
