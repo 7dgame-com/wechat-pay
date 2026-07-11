@@ -89,3 +89,31 @@ export function isWechatPayConfigured(): boolean {
         config.wechat.platformCertificatePath)
   );
 }
+
+export function getServiceConfigErrors(
+  current: ServiceConfig = config,
+  nodeEnv: string | undefined = process.env.NODE_ENV
+): string[] {
+  const errors: string[] = [];
+  if (nodeEnv === 'production' && !current.apiKey) {
+    errors.push('PAYMENT_SERVICE_API_KEY is required in production.');
+  }
+  if (
+    nodeEnv === 'production' &&
+    current.apiKey &&
+    ['change-me', 'replace-me', 'your-service-key'].includes(current.apiKey.trim().toLowerCase())
+  ) {
+    errors.push('PAYMENT_SERVICE_API_KEY must not use a documented placeholder in production.');
+  }
+  return errors;
+}
+
+export function assertServiceConfig(
+  current: ServiceConfig = config,
+  nodeEnv: string | undefined = process.env.NODE_ENV
+): void {
+  const errors = getServiceConfigErrors(current, nodeEnv);
+  if (errors.length > 0) {
+    throw new Error(`Invalid payment service configuration: ${errors.join(' ')}`);
+  }
+}
