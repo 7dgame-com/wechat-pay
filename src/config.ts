@@ -72,6 +72,10 @@ export const config: ServiceConfig = {
 };
 
 export function isWechatPayConfigured(): boolean {
+  const hasPublicKey = Boolean(config.wechat.platformPublicKey || config.wechat.platformPublicKeyPath);
+  const hasVerificationKey = hasPublicKey
+    ? /^PUB_KEY_ID_\d+$/.test(config.wechat.platformSerialNo || '')
+    : Boolean(config.wechat.platformCertificate || config.wechat.platformCertificatePath);
   const hasDirectIdentity = Boolean(config.wechat.appId && config.wechat.mchId);
   const hasPartnerIdentity = Boolean(
     (config.wechat.spAppId || config.wechat.appId) &&
@@ -83,10 +87,7 @@ export function isWechatPayConfigured(): boolean {
       (config.wechat.privateKey || config.wechat.privateKeyPath) &&
       config.wechat.certSerialNo &&
       config.wechat.apiV3Key &&
-      (config.wechat.platformPublicKey ||
-        config.wechat.platformPublicKeyPath ||
-        config.wechat.platformCertificate ||
-        config.wechat.platformCertificatePath)
+      hasVerificationKey
   );
 }
 

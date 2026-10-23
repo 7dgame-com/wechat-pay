@@ -27,5 +27,17 @@ Set `PAYMENT_SERVICE_API_KEY` in both the payment service and the main API to pr
 - `WECHAT_PAY_CERT_SERIAL_NO`
 - `WECHAT_PAY_API_V3_KEY`
 - `WECHAT_PAY_PLATFORM_PUBLIC_KEY`, `WECHAT_PAY_PLATFORM_PUBLIC_KEY_PATH`, `WECHAT_PAY_PLATFORM_CERT`, or `WECHAT_PAY_PLATFORM_CERT_PATH`
+- `WECHAT_PAY_PLATFORM_SERIAL_NO`: the `PUB_KEY_ID_...` identifier matching the configured WeChat Pay public key. Required when using a public key; it is separate from the merchant `WECHAT_PAY_CERT_SERIAL_NO` used for request Authorization.
 - `WECHAT_PAY_API_BASE_URL`
 - `WECHAT_PAY_SUPPORT_FAPIAO`
+
+Payment requests specify the configured verification key and `Accept-Language:
+zh-CN`. Successful responses and callbacks are verified using their original
+body and signature headers before parsing. A configured public key and an
+existing platform certificate can coexist: the incoming `Wechatpay-Serial`
+selects exactly one matching key. Certificate-only setups use the certificate's
+own serial. Unknown serials, missing signature headers, signature probes, and
+timestamps outside a 300-second window are rejected. Public-key configuration
+without its matching ID reports `wechatConfigured: false` and cannot send
+payment requests. Keep existing APIv3 AES keys and merchant credentials separate
+from this verification-key configuration.
