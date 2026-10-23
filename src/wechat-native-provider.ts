@@ -111,24 +111,30 @@ function loadMerchantPrivateKey(): string {
   return readTextFile(config.wechat.privateKeyPath, 'WECHAT_PAY_PRIVATE_KEY_PATH');
 }
 
-function loadWechatPayPublicKey(): string {
-  if (config.wechat.platformPublicKey) {
-    return config.wechat.platformPublicKey.replace(/\\n/g, '\n');
+function loadWechatPayVerificationKeys(): { serialNo: string; keys: Map<string, string> } {
+  const keys = new Map<string, string>();
+  if (config.wechat.platformPublicKey || config.wechat.platformPublicKeyPath) {
+    const serialNo = requireConfig(config.wechat.platformSerialNo, 'WECHAT_PAY_PLATFORM_SERIAL_NO');
+    if (!/^PUB_KEY_ID_\d+$/.test(serialNo)) {
+      throw new Error('WECHAT_PAY_PLATFORM_SERIAL_NO must be the PUB_KEY_ID_ identifier of the configured WeChat Pay public key.');
+    }
+    const publicKey = config.wechat.platformPublicKey
+      ? config.wechat.platformPublicKey.replace(/\\n/g, '\n')
+      : readTextFile(config.wechat.platformPublicKeyPath, 'WECHAT_PAY_PLATFORM_PUBLIC_KEY_PATH');
+    keys.set(serialNo, publicKey);
   }
-  if (config.wechat.platformPublicKeyPath) {
-    return readTextFile(config.wechat.platformPublicKeyPath, 'WECHAT_PAY_PLATFORM_PUBLIC_KEY_PATH');
+  if (config.wechat.platformCertificate || config.wechat.platformCertificatePath) {
+    const pem = config.wechat.platformCertificate
+      ? config.wechat.platformCertificate.replace(/\\n/g, '\n')
+      : readTextFile(config.wechat.platformCertificatePath, 'WECHAT_PAY_PLATFORM_CERT_PATH');
+    const certificate = new X509Certificate(pem);
+    keys.set(certificate.serialNumber, certificate.publicKey.export({ type: 'spki', format: 'pem' }).toString());
   }
-  if (config.wechat.platformCertificate) {
-    const certificate = new X509Certificate(config.wechat.platformCertificate.replace(/\\n/g, '\n'));
-    return certificate.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const serialNo = keys.keys().next().value;
+  if (!serialNo) {
+    throw new Error('A WeChat Pay platform public key or certificate is required for signature verification.');
   }
-  if (config.wechat.platformCertificatePath) {
-    const certificate = new X509Certificate(readTextFile(config.wechat.platformCertificatePath, 'WECHAT_PAY_PLATFORM_CERT_PATH'));
-    return certificate.publicKey.export({ type: 'spki', format: 'pem' }).toString();
-  }
-  throw new Error(
-    'WECHAT_PAY_PLATFORM_PUBLIC_KEY, WECHAT_PAY_PLATFORM_PUBLIC_KEY_PATH, WECHAT_PAY_PLATFORM_CERT, or WECHAT_PAY_PLATFORM_CERT_PATH is required for WeChat Pay notification verification.'
-  );
+  return { serialNo, keys };
 }
 
 function nonce(): string {
@@ -296,8 +302,6 @@ export class WechatNativePaymentProvider implements PaymentProvider {
 
     const appId = requireConfig(config.wechat.appId, 'WECHAT_PAY_APP_ID');
     const mchId = requireConfig(config.wechat.mchId, 'WECHAT_PAY_MCH_ID');
-    const serialNo = requireConfig(config.wechat.certSerialNo, 'WECHAT_PAY_CERT_SERIAL_NO');
-    const privateKey = loadMerchantPrivateKey();
     const url = new URL('/v3/pay/transactions/native', config.wechat.apiBaseUrl);
     const body = JSON.stringify({
       appid: appId,
@@ -314,28 +318,9 @@ export class WechatNativePaymentProvider implements PaymentProvider {
       support_fapiao: input.supportFapiao ?? config.wechat.supportFapiao,
     });
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: buildWechatAuthorization({
-          method: 'POST',
-          url,
-          body,
-          mchId,
-          serialNo,
-          privateKey,
-        }),
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        'User-Agent': 'wechat-pay-service/1.0',
-      },
-      body,
-    });
-    const responseText = await response.text();
-    if (!response.ok) {
-      throw new Error(`WeChat Pay Native order failed: ${response.status} ${responseText}`);
-    }
-    const parsed = JSON.parse(responseText) as { code_url?: string };
+    const parsed = await this.wechatRequest<{ code_url?: string }>(
+      'POST', url, body, {}, 'WeChat Pay Native order failed'
+    );
     if (!parsed.code_url) throw new Error('WeChat Pay Native order response did not include code_url.');
     return { codeUrl: parsed.code_url };
   }
@@ -382,35 +367,16 @@ export class WechatNativePaymentProvider implements PaymentProvider {
     }
 
     const mchId = requireConfig(config.wechat.mchId, 'WECHAT_PAY_MCH_ID');
-    const serialNo = requireConfig(config.wechat.certSerialNo, 'WECHAT_PAY_CERT_SERIAL_NO');
-    const privateKey = loadMerchantPrivateKey();
     const url = new URL(`/v3/pay/transactions/out-trade-no/${encodeURIComponent(outTradeNo)}`, config.wechat.apiBaseUrl);
     url.searchParams.set('mchid', mchId);
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: buildWechatAuthorization({
-          method: 'GET',
-          url,
-          body: '',
-          mchId,
-          serialNo,
-          privateKey,
-        }),
-        Accept: 'application/json',
-        'User-Agent': 'wechat-pay-service/1.0',
-      },
-    });
-    const responseText = await response.text();
-    if (!response.ok) {
-      throw new Error(`WeChat Pay query order failed: ${response.status} ${responseText}`);
-    }
-    return toPaymentNotification(JSON.parse(responseText) as WechatTransaction);
+    return toPaymentNotification(await this.wechatRequest<WechatTransaction>(
+      'GET', url, '', {}, 'WeChat Pay query order failed'
+    ));
   }
 
   async parsePaymentNotification(headers: Record<string, unknown>, rawBody: Buffer | string): Promise<PaymentNotification> {
     const bodyText = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : rawBody;
-    this.verifyNotificationSignature(headers, bodyText);
+    this.verifySignature(headers, bodyText);
     const body = JSON.parse(bodyText) as WechatPaymentNotifyBody;
     if (!body.resource) throw new Error('WeChat Pay notification missing resource.');
     const transaction = decryptWechatResource<WechatTransaction>(
@@ -425,7 +391,7 @@ export class WechatNativePaymentProvider implements PaymentProvider {
     rawBody: Buffer | string
   ): Promise<WechatInvoiceNotification> {
     const bodyText = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : rawBody;
-    this.verifyNotificationSignature(headers, bodyText);
+    this.verifySignature(headers, bodyText);
     const body = JSON.parse(bodyText) as WechatPaymentNotifyBody;
     if (!body.resource) throw new Error('WeChat fapiao notification missing resource.');
     const resource = decryptWechatResource<WechatInvoiceNotifyResource>(
@@ -531,11 +497,13 @@ export class WechatNativePaymentProvider implements PaymentProvider {
     method: 'GET' | 'POST' | 'PATCH',
     url: URL,
     body = '',
-    extraHeaders: Record<string, string> = {}
+    extraHeaders: Record<string, string> = {},
+    errorPrefix = 'WeChat Pay request failed'
   ): Promise<T> {
     const mchId = getSigningMchId();
     const serialNo = requireConfig(config.wechat.certSerialNo, 'WECHAT_PAY_CERT_SERIAL_NO');
     const privateKey = loadMerchantPrivateKey();
+    const verification = loadWechatPayVerificationKeys();
     const response = await fetch(url, {
       method,
       headers: {
@@ -548,6 +516,8 @@ export class WechatNativePaymentProvider implements PaymentProvider {
           privateKey,
         }),
         Accept: 'application/json',
+        'Accept-Language': 'zh-CN',
+        'Wechatpay-Serial': verification.serialNo,
         ...(body ? { 'Content-Type': 'application/json' } : {}),
         'User-Agent': 'wechat-pay-service/1.0',
         ...extraHeaders,
@@ -556,30 +526,43 @@ export class WechatNativePaymentProvider implements PaymentProvider {
     });
     const responseText = await response.text();
     if (!response.ok) {
-      throw new Error(`WeChat Pay request failed: ${response.status} ${responseText}`);
+      throw new Error(`${errorPrefix}: ${response.status} ${responseText}`);
     }
+    this.verifySignature(Object.fromEntries(response.headers), responseText, verification.keys);
     return (responseText ? JSON.parse(responseText) : {}) as T;
   }
 
-  private verifyNotificationSignature(headers: Record<string, unknown>, bodyText: string): void {
+  private verifySignature(
+    headers: Record<string, unknown>,
+    bodyText: string,
+    keys = loadWechatPayVerificationKeys().keys
+  ): void {
     const timestamp = normalizeHeader(headers, 'Wechatpay-Timestamp');
     const nonceStr = normalizeHeader(headers, 'Wechatpay-Nonce');
     const signature = normalizeHeader(headers, 'Wechatpay-Signature');
-    if (!timestamp || !nonceStr || !signature) {
-      throw new Error('WeChat Pay notification signature headers are incomplete.');
+    const serialNo = normalizeHeader(headers, 'Wechatpay-Serial');
+    if (!timestamp || !nonceStr || !signature || !serialNo) {
+      throw new Error('WeChat Pay signature headers are incomplete.');
     }
+    if (signature.startsWith('WECHATPAY/SIGNTEST/')) throw new Error('Invalid WeChat Pay signature.');
+    const timestampValue = Number(timestamp);
+    if (!/^\d+$/.test(timestamp) || !Number.isSafeInteger(timestampValue) || Math.abs(Math.floor(Date.now() / 1000) - timestampValue) > 300) {
+      throw new Error('WeChat Pay signature timestamp is outside the allowed clock offset.');
+    }
+    const publicKey = keys.get(serialNo);
+    if (!publicKey) throw new Error('Unknown WeChat Pay verification serial.');
 
     const message = `${timestamp}\n${nonceStr}\n${bodyText}\n`;
     const verifier = createVerify('RSA-SHA256');
     verifier.update(message);
     const verified = verifier.verify(
       {
-        key: loadWechatPayPublicKey(),
+        key: publicKey,
         padding: constants.RSA_PKCS1_PADDING,
       },
       signature,
       'base64'
     );
-    if (!verified) throw new Error('Invalid WeChat Pay notification signature.');
+    if (!verified) throw new Error('Invalid WeChat Pay signature.');
   }
 }
